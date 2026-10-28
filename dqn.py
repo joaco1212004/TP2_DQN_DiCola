@@ -86,6 +86,11 @@ def train_dqn(
     seed=42,
     tracked_states=None,
     device="cpu",
+    eval_env=None,
+    eval_interval=50,
+    eval_episodes=30,
+    eval_seed=10000,
+    checkpoint_path=None,
 ):
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
@@ -139,6 +144,20 @@ def train_dqn(
 
     global_steps = 0
     start_time = time.perf_counter()
+
+    best_checkpoint_reward = -float("inf")
+    best_checkpoint_episode = None
+
+    checkpoint_episodes = []
+    checkpoint_rewards = []
+
+    if eval_env is not None and checkpoint_path is None:
+        raise ValueError(
+            "A checkpoint_path is required when using eval_env."
+        )
+
+    if eval_env is not None and eval_interval <= 0:
+        raise ValueError("eval_interval must be positive.")
 
     for episode in range(num_episodes):
 
@@ -292,9 +311,11 @@ def train_dqn(
                     online_net.state_dict()
                 )
 
+        # Registrar métricas del episodio
         rewards.append(total_reward)
         lengths.append(steps)
         epsilons.append(epsilon)
+
         episode_times.append(
             time.perf_counter() - start_time
         )
@@ -326,6 +347,50 @@ def train_dqn(
                         q_vals.cpu().numpy().copy()
                     )
 
+        # =====================================================
+        # NUEVO: Evaluación periódica y guardado de checkpoints
+        # =====================================================
+
+        if eval_env is not None and (
+            (episode + 1) % eval_interval == 0
+            or episode + 1 == num_episodes
+        ):
+
+            evaluation = evaluate_dqn(
+                eval_env,
+                online_net,
+                num_episodes=eval_episodes,
+                epsilon=0.0,
+                seed=eval_seed,
+                device=device
+            )
+
+            score = evaluation["mean_reward"]
+
+            checkpoint_episodes.append(episode + 1)
+            checkpoint_rewards.append(score)
+
+            # Guardar la mejor política encontrada
+            if score > best_checkpoint_reward:
+
+                best_checkpoint_reward = score
+                best_checkpoint_episode = episode + 1
+
+                torch.save(
+                    online_net.state_dict(),
+                    checkpoint_path
+                )
+
+            # Volver al modo entrenamiento
+            online_net.train()
+
+            print(
+                f"Episode {episode + 1} | "
+                f"Eval reward: {score:.2f} | "
+                f"Best: {best_checkpoint_reward:.2f} "
+                f"(episode {best_checkpoint_episode})"
+            )
+
     history = {
         "rewards": np.asarray(rewards),
         "lengths": np.asarray(lengths),
@@ -339,6 +404,10 @@ def train_dqn(
         },
         "wall_time": time.perf_counter() - start_time,
         "episode_times": np.asarray(episode_times),
+        "checkpoint_episodes": np.asarray(checkpoint_episodes),
+        "checkpoint_rewards": np.asarray(checkpoint_rewards),
+        "best_checkpoint_episode": best_checkpoint_episode,
+        "best_checkpoint_reward": best_checkpoint_reward,
     }
 
     return online_net, history
